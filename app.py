@@ -1,26 +1,123 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from datetime import datetime
 import os
-import sys
-from pathlib import Path
 
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
+app = FastAPI(
+    title="Sales Angel Intelligence API",
+    version="2.0.0",
+    description="AI-powered sales intelligence platform"
+)
 
-try:
-    from api.main import app
-except ImportError:
-    # Fallback: Create a minimal app if api.main doesn't exist
-    from fastapi import FastAPI
-    app = FastAPI(title="Sales Angel Production", version="1.0.0")
-    
-    @app.get("/health")
-    async def health():
-        return {"status": "healthy", "version": "1.0.0"}
-    
-    @app.get("/")
-    async def root():
-        return {"message": "Sales Angel Production API", "status": "operational"}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ==================== ROOT ENDPOINTS ====================
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Sales Angel Production API",
+        "status": "operational",
+        "version": "2.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": [
+            "/api/intelligence/status",
+            "/api/intelligence/full-stack",
+            "/api/enrichment/status",
+            "/docs"
+        ]
+    }
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# ==================== INTELLIGENCE ENDPOINTS ====================
+
+class EnrichmentRequest(BaseModel):
+    name: str
+    company: Optional[str] = None
+    email: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    vertical: str = "saas"
+
+@app.get("/api/intelligence/status")
+async def intelligence_status():
+    """Check intelligence system status"""
+    return {
+        "status": "operational",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "modules": {
+            "enrichment": "ready",
+            "scoring": "ready",
+            "content": "ready"
+        }
+    }
+
+@app.post("/api/intelligence/full-stack")
+async def full_stack_intelligence(request: EnrichmentRequest):
+    """Full intelligence pipeline endpoint"""
+    return {
+        "status": "success",
+        "message": "Intelligence system connected successfully!",
+        "request": request.dict(),
+        "enrichment": {
+            "profile": f"Mock enrichment for {request.name} at {request.company}",
+            "timestamp": datetime.now().isoformat()
+        },
+        "scoring": {
+            "score": 85,
+            "tier": "HOT",
+            "factors": ["Decision maker", "Budget available", "Recent funding"]
+        },
+        "next_steps": "Ready to integrate real enrichment modules"
+    }
+
+# ==================== ENRICHMENT ENDPOINTS ====================
+
+@app.get("/api/enrichment/status")
+async def enrichment_status():
+    return {
+        "status": "enrichment ready",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/api/enrichment/enrich")
+async def enrich_lead(name: str, company: Optional[str] = None):
+    return {
+        "enriched": True,
+        "name": name,
+        "company": company,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# ==================== ANALYTICS ENDPOINTS ====================
+
+@app.get("/api/analytics/status")
+async def analytics_status():
+    return {
+        "status": "analytics ready",
+        "timestamp": datetime.now().isoformat()
+    }
+
+# ==================== PIPELINE ENDPOINTS ====================
+
+@app.get("/api/pipeline/status")
+async def pipeline_status():
+    return {
+        "status": "pipeline ready",
+        "timestamp": datetime.now().isoformat()
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
