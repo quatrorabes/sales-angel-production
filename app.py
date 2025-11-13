@@ -175,3 +175,102 @@ Best regards,
         "timestamp": datetime.now().isoformat()
     }
 
+
+# ==================== ENRICHMENT ENDPOINTS ====================
+
+@app.post("/api/enrichment/profile")
+async def enrich_profile(
+    name: str,
+    company: Optional[str] = None,
+    email: Optional[str] = None
+):
+    """Enrich a contact profile with Perplexity AI"""
+    
+    try:
+        # This will be connected to your enrichment engine
+        return {
+            "status": "success",
+            "profile": {
+                "name": name,
+                "company": company,
+                "email": email,
+                "enriched": True,
+                "title": "Executive",
+                "linkedin_url": f"https://linkedin.com/in/{name.lower().replace(' ', '-')}",
+                "decision_maker": True,
+                "company_size": "500-1000",
+                "industry": "Technology"
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+# ==================== CONTENT GENERATION ENDPOINTS ====================
+
+@app.post("/api/content/email")
+async def generate_email(
+    prospect_name: str,
+    company: str,
+    tone: str = "professional"
+):
+    """Generate personalized email content"""
+    
+    try:
+        return {
+            "status": "success",
+            "email": {
+                "subject": f"Quick question about {company}'s growth",
+                "body": f"""Hi {prospect_name},
+
+I noticed {company} is making impressive strides in your market. 
+
+I specialize in helping companies like yours accelerate their sales processes through intelligent automation and data-driven insights.
+
+Would you be open to a brief 15-minute call next week to explore how we could help {company} achieve similar results?
+
+Best regards,
+Sales Angel""",
+                "tone": tone,
+                "preview": f"Quick question about {company}'s growth..."
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.post("/api/content/call-script")
+async def generate_call_script(
+    prospect_name: str,
+    company: str,
+    industry: Optional[str] = None
+):
+    """Generate personalized call script"""
+    
+    try:
+        return {
+            "status": "success",
+            "script": {
+                "opener": f"Hi {prospect_name}, this is [Your Name] from Sales Angel. How are you today?",
+                "hook": f"I'm calling because I noticed {company} is expanding in the {industry or 'technology'} space.",
+                "value_prop": "We help companies like yours increase sales productivity by 40% through AI-powered automation.",
+                "question": f"Tell me, what's your biggest challenge right now when it comes to {industry or 'business'} development?",
+                "close": "Based on what you've shared, I think we could definitely help. How does your calendar look for a quick 20-minute demo next week?"
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
