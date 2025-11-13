@@ -19,50 +19,15 @@ async def intelligence_status():
     return {
         "status": "operational",
         "version": "1.0.0",
-        "modules": {
-            "enrichment": "checking...",
-            "scoring": "checking...",
-            "content": "checking..."
-        }
+        "timestamp": datetime.now().isoformat()
     }
 
 @router.post("/full-stack")
 async def full_stack_intelligence(request: EnrichmentRequest):
-    """
-    Simplified version for testing - we'll add the real logic after confirming it works
-    """
-    try:
-        # For now, return mock data to test the endpoint
-        return {
-            "status": "success",
-            "contact": request.dict(),
-            "enrichment": {
-                "profile": f"Mock enrichment for {request.name} at {request.company}",
-                "timestamp": datetime.now().isoformat()
-            },
-            "scoring": {
-                "score": 85,
-                "tier": "HOT",
-                "factors": ["Decision maker", "Budget available", "Recent funding"]
-            },
-            "content": {
-                "email_generated": True,
-                "scripts_generated": True
-            },
-            "message": "Full intelligence pipeline will be activated once modules are confirmed"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/enrich")
-async def enrich_contact(request: EnrichmentRequest):
-    """Simplified enrichment endpoint"""
+    """Test endpoint for full intelligence pipeline"""
     return {
         "status": "success",
-        "enriched": True,
-        "data": {
-            "name": request.name,
-            "company": request.company,
-            "enrichment": "Mock enrichment data"
-        }
+        "message": "Intelligence system connected",
+        "request": request.dict(),
+        "timestamp": datetime.now().isoformat()
     }
