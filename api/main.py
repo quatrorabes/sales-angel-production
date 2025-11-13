@@ -56,3 +56,12 @@ try:
     app.include_router(analytics.router)
 except:
     pass
+
+# Import all route modules
+from api.routes import enrichment, intelligence, analytics, pipeline
+
+# Include all routers
+app.include_router(enrichment.router)
+app.include_router(intelligence.router)
+app.include_router(analytics.router)
+app.include_router(pipeline.router)
