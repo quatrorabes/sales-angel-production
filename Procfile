@@ -1,1 +1,1 @@
-web: gunicorn -w 1 -b 0.0.0.0:$PORT --timeout 60 "api.main:app"
+web: python -m uvicorn api.main:app --host 0.0.0.0 --port $PORT
