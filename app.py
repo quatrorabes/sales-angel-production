@@ -121,3 +121,57 @@ async def pipeline_status():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ==================== ENRICHMENT ENDPOINTS ====================
+
+@app.post("/api/enrichment/profile")
+async def enrich_profile(
+    name: str,
+    company: Optional[str] = None,
+    email: Optional[str] = None
+):
+    """Enrich a contact profile with additional information"""
+    
+    return {
+        "status": "success",
+        "profile": {
+            "name": name,
+            "company": company,
+            "email": email,
+            "enriched": True,
+            "title": "Mock Title",
+            "linkedin": "https://linkedin.com/in/mock",
+            "decision_maker": True
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+
+# ==================== CONTENT GENERATION ENDPOINTS ====================
+
+@app.post("/api/content/email")
+async def generate_email(
+    prospect_name: str,
+    company: str,
+    tone: str = "professional"
+):
+    """Generate personalized email content"""
+    
+    return {
+        "status": "success",
+        "email": {
+            "subject": f"Quick question about {company}'s growth",
+            "body": f"""Hi {prospect_name},
+
+I noticed {company} is making impressive strides in the market. 
+
+I help companies like yours accelerate their sales processes through intelligent automation.
+
+Would you be open to a brief 15-minute call next week to explore how we could help {company} achieve similar results?
+
+Best regards,
+[Your Name]""",
+            "tone": tone
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+
