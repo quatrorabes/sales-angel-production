@@ -197,7 +197,7 @@ async def generate_emails(request: dict):
                             "https://api.perplexity.ai/chat/completions",
                             headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}"},
                             json={
-                                "model": "pplx-70b-online",
+                                "model": "sonar-pro",
                                 "messages": [{"role": "user", "content": prompt}],
                                 "max_tokens": 200
                             },
@@ -291,7 +291,7 @@ async def generate_call_scripts(request: dict):
                             "https://api.perplexity.ai/chat/completions",
                             headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}"},
                             json={
-                                "model": "pplx-70b-online",
+                                "model": "sonar-pro",
                                 "messages": [{"role": "user", "content": prompt}],
                                 "max_tokens": 150
                             },
