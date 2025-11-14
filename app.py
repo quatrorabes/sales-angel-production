@@ -15,17 +15,19 @@ Behavior:
 - Generates:
     - 3 email variants (subject + body)
     - 3 call scripts
+    - 1 LinkedIn framework (connection request + follow-up)
 - Writes results back to HubSpot contact properties:
-    - email_framework   (multi-line text)
-    - call_framework    (multi-line text)
-    - last_enrichment   (date, YYYY-MM-DD)
+    - email_framework    (multi-line text)
+    - call_framework     (multi-line text)
+    - linkedin_framework (multi-line text)
+    - last_enrichment    (date, YYYY-MM-DD)
 """
 
 import os
 import logging
 from datetime import datetime
 from typing import List, Dict, Any
-
+from fastapi.responses import HTMLResponse
 import requests
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -59,7 +61,7 @@ if not PERPLEXITY_API_KEY:
 app = FastAPI(
     title="Sales Angel Production API",
     description="HubSpot webhook integration with Perplexity sonar-pro",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 # -------------------------------------------------------------------------
@@ -209,6 +211,38 @@ def generate_call_scripts(
     return scripts
 
 
+def generate_linkedin_framework(
+    prospect_name: str,
+    company: str,
+    job_title: str = "",
+) -> str:
+    """
+    Generate LinkedIn connection + follow-up InMail.
+    Returns a single multi-line text block.
+    """
+    prompt = (
+        f"You are a sales development rep writing LinkedIn outreach.\n"
+        f"Prospect: {prospect_name}\n"
+        f"Company: {company or 'Unknown Company'}\n"
+        f"Title: {job_title or 'Unknown title'}\n\n"
+        f"Create:\n"
+        f"1) A personalized connection request (max 280 characters).\n"
+        f"2) A follow-up InMail message if they accept.\n\n"
+        f"Output format strictly as:\n"
+        f"Connection Request:\n"
+        f"<connection text>\n\n"
+        f"Follow-up InMail:\n"
+        f"<inmail text>"
+    )
+
+    try:
+        raw = call_perplexity(prompt, max_tokens=300)
+        return raw.strip()
+    except Exception as e:
+        logger.error(f"LinkedIn framework generation failed: {e}")
+        return ""
+    
+
 # -------------------------------------------------------------------------
 # HubSpot helpers
 # -------------------------------------------------------------------------
@@ -243,11 +277,13 @@ def update_hubspot_framework_fields(
     contact_id: str,
     email_variants: List[Dict[str, Any]],
     call_scripts: List[Dict[str, Any]],
+    linkedin_framework: str,
 ) -> bool:
     """
     Update HubSpot contact properties:
         - email_framework
         - call_framework
+        - linkedin_framework
         - last_enrichment
     """
 
@@ -281,10 +317,16 @@ def update_hubspot_framework_fields(
 
     call_text = "\n".join(call_lines)
 
+    linkedin_text = ""
+    if linkedin_framework:
+        linkedin_lines = ["=== SALES ANGEL LINKEDIN FRAMEWORK ===", "", linkedin_framework]
+        linkedin_text = "\n".join(linkedin_lines)
+
     payload = {
         "properties": {
             "email_framework": email_text,
             "call_framework": call_text,
+            "linkedin_framework": linkedin_text,
             "last_enrichment": datetime.utcnow().strftime("%Y-%m-%d"),
         }
     }
@@ -348,6 +390,7 @@ async def hubspot_webhook(payload: Dict[str, Any]):
         # 2) Generate content via Perplexity
         email_variants: List[Dict[str, Any]] = []
         call_scripts: List[Dict[str, Any]] = []
+        linkedin_framework: str = ""
 
         try:
             email_variants = generate_email_variants(prospect_name, company, job_title)
@@ -361,11 +404,23 @@ async def hubspot_webhook(payload: Dict[str, Any]):
         except Exception as e:
             logger.error(f"Call script generation error: {e}")
 
+        try:
+            linkedin_framework = generate_linkedin_framework(
+                prospect_name, company, job_title
+            )
+            logger.info(
+                "✅ Generated LinkedIn framework" if linkedin_framework else
+                "⚠️ LinkedIn framework generation returned empty text"
+            )
+        except Exception as e:
+            logger.error(f"LinkedIn framework error: {e}")
+
         # 3) Update HubSpot
         properties_updated = update_hubspot_framework_fields(
             contact_id=contact_id,
             email_variants=email_variants,
             call_scripts=call_scripts,
+            linkedin_framework=linkedin_framework,
         )
 
         response_data = {
@@ -376,6 +431,7 @@ async def hubspot_webhook(payload: Dict[str, Any]):
             "email": email or None,
             "emails_generated": len(email_variants),
             "scripts_generated": len(call_scripts),
+            "linkedin_generated": bool(linkedin_framework),
             "properties_updated": properties_updated,
             "timestamp": datetime.utcnow().isoformat(),
         }
@@ -394,6 +450,121 @@ async def hubspot_webhook(payload: Dict[str, Any]):
             },
         )
 
+@app.get("/ui/contact/{contact_id}", response_class=HTMLResponse)
+async def ui_contact_preview(contact_id: str):
+    """
+    Simple HTML UI to preview Sales Angel frameworks for a single contact.
+    Opens in a browser so you see what reps will see.
+    """
+    try:
+        # Fetch frameworks + meta from HubSpot
+        if not HUBSPOT_API_KEY:
+            return HTMLResponse("<h2>HUBSPOT_API_KEY not configured</h2>", status_code=500)
+        
+        headers = {
+            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        params = {
+            "properties": (
+                "firstname,lastname,company,email,"
+                "email_framework,call_framework,linkedin_framework,"
+                "framework_subject,framework_body,"
+                "framework_freshness,last_enrichment,"
+                "framework_feed,content_depth,batch_enrichment"
+            )
+        }
+        url = f"{HUBSPOT_BASE_URL}/crm/v3/objects/contacts/{contact_id}"
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        if resp.status_code != 200:
+            return HTMLResponse(
+                f"<h2>HubSpot fetch error {resp.status_code}</h2><pre>{resp.text}</pre>",
+                status_code=resp.status_code,
+            )
+        
+        props = resp.json().get("properties", {}) or {}
+        
+        first_name = props.get("firstname", "") or ""
+        last_name = props.get("lastname", "") or ""
+        company = props.get("company", "") or ""
+        email = props.get("email", "") or ""
+        full_name = (first_name + " " + last_name).strip() or "Unknown Contact"
+        
+        email_fw = props.get("email_framework", "") or "—"
+        call_fw = props.get("call_framework", "") or "—"
+        li_fw = props.get("linkedin_framework", "") or "—"
+        fw_subject = props.get("framework_subject", "") or "—"
+        fw_body = props.get("framework_body", "") or "—"
+        
+        freshness = props.get("framework_freshness", "") or "not_set"
+        last_enrichment = props.get("last_enrichment", "") or "—"
+        fw_feed = props.get("framework_feed", "") or "—"
+        depth = props.get("content_depth", "") or "standard"
+        batch_status = props.get("batch_enrichment", "") or "not_scheduled"
+        
+        html = f"""
+        <html>
+        <head>
+            <title>Sales Angel Preview - {full_name}</title>
+            <style>
+                body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; padding: 24px; }}
+                h1, h2, h3 {{ margin-bottom: 8px; }}
+                .meta {{ margin-bottom: 16px; }}
+                .meta span {{ display: inline-block; margin-right: 16px; font-size: 0.9rem; color: #555; }}
+                .section {{ margin-bottom: 24px; }}
+                pre {{ white-space: pre-wrap; background:#f7f7f7; padding:12px; border-radius:4px; }}
+                .pill {{ display:inline-block; padding:2px 8px; border-radius:999px; background:#eee; font-size:0.8rem; }}
+            </style>
+        </head>
+        <body>
+            <h1>Sales Angel Frameworks</h1>
+            <div class="meta">
+                <span><strong>Contact:</strong> {full_name}</span>
+                <span><strong>Company:</strong> {company or '—'}</span>
+                <span><strong>Email:</strong> {email or '—'}</span>
+            </div>
+            <div class="meta">
+                <span><strong>Framework freshness:</strong> <span class="pill">{freshness}</span></span>
+                <span><strong>Last enrichment:</strong> {last_enrichment}</span>
+                <span><strong>Content depth:</strong> {depth}</span>
+                <span><strong>Batch:</strong> {batch_status}</span>
+            </div>
+
+            <div class="section">
+                <h2>Primary Email (for sequences)</h2>
+                <p><strong>Subject:</strong> {fw_subject}</p>
+                <pre>{fw_body}</pre>
+            </div>
+
+            <div class="section">
+                <h2>Email Framework (all variants)</h2>
+                <pre>{email_fw}</pre>
+            </div>
+
+            <div class="section">
+                <h2>Call Framework</h2>
+                <pre>{call_fw}</pre>
+            </div>
+
+            <div class="section">
+                <h2>LinkedIn Framework</h2>
+                <pre>{li_fw}</pre>
+                <pre>{li_fw}</pre>
+            </div>
+
+            <div class="section">
+                <h3>Framework Feed (activity log)</h3>
+                <pre>{fw_feed}</pre>
+            </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(html)
+    
+    except Exception as exc:
+        return HTMLResponse(f"<h2>Error</h2><pre>{exc}</pre>", status_code=500)
+    
 
 # -------------------------------------------------------------------------
 # Local dev entrypoint (optional)
@@ -409,3 +580,7 @@ if __name__ == "__main__":
         reload=True,
         log_level="info",
     )
+    
+@app.get("/")
+async def root():
+    return {"message": "Sales Angel API is running. See /docs for API documentation."}
