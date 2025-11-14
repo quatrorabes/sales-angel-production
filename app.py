@@ -274,8 +274,36 @@ class ProfileEnrichmentEngine:
 
         if current_content:
             sections[current_section] = '\n'.join(current_content).strip()
-
+            
         return sections
+    
+    # ==================== HUBSPOT WEBHOOK INTEGRATION ====================
+  
+    @app.post("/webhooks/hubspot")
+    async def hubspot_webhook(request: dict):
+      """Receive HubSpot contact events"""
+      try:
+        contact_id = request.get("objectId")
+        logger.info(f"🔔 HubSpot webhook received for contact: {contact_id}")
+        
+        # ... all your code ...
+        
+        return {
+          "status": "success",
+          "contact_id": contact_id,
+          "prospect": prospect_name,
+          "company": company,
+          "emails_generated": len(email_variants),
+          "scripts_generated": len(call_scripts)
+        }
+      
+      except Exception as e:
+        logger.error(f"❌ HubSpot webhook error: {str(e)}")
+        return {"status": "error", "message": str(e)}
+      
+      
+    # Initialize enrichment engine
+    enrichment_engine = ProfileEnrichmentEngine()
 
 # Initialize enrichment engine
 enrichment_engine = ProfileEnrichmentEngine()
@@ -450,7 +478,10 @@ Body: [email body]"""
 
         return variants
 
-email_generator = EmailGenerator()
+email_generator = None
+call_script_generator = None
+perplexity_enricher = None
+
 
 # ==================== CALL SCRIPT GENERATOR (FROM YOUR FILE) ====================
 
@@ -857,3 +888,4 @@ async def system_status():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+  
