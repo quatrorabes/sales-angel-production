@@ -1,0 +1,49 @@
+# OS Files
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+
+# Environment
+.env
+.env.local
+
+# Backup files
+*.backup
+*_v*.py
+app_v*.py
+
+# Build/Dist
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
+
+# Misc
+docs/
+FINAL_SUMMARY.txt
+Procfile-prod
+requirements-prod.txt
