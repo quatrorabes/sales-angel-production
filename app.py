@@ -2,13 +2,14 @@
 SALES ANGEL PRODUCTION - FastAPI Application
 HubSpot Webhook Integration with Auto-Enrichment
 Fixed: SQLAlchemy Base, psycopg2, error handling
+Enhanced: Better logging + stub content endpoints
 """
 
 import os
 import sys
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 import requests
 import json
 
@@ -146,9 +147,202 @@ async def root():
         "endpoints": {
             "health": "/health",
             "webhook": "/webhooks/hubspot",
+            "content_email": "/api/content/email",
+            "content_call_script": "/api/content/call-script",
             "docs": "/docs"
         }
     }
+
+# ============================================================================
+# CONTENT GENERATION ENDPOINTS
+# ============================================================================
+
+@app.post("/api/content/email")
+async def generate_emails(request: dict):
+    """Generate email variants for a contact"""
+    try:
+        contact_id = request.get("contact_id")
+        prospect_name = request.get("prospect_name", "Prospect")
+        company = request.get("company", "Company")
+        email = request.get("email", "")
+        jobtitle = request.get("jobtitle", "")
+        
+        logger.info(f"📧 Generating emails for {prospect_name} @ {company} (contact_id: {contact_id})")
+        
+        if not OPENAI_API_KEY and not PERPLEXITY_API_KEY:
+            logger.error("No API keys configured for content generation")
+            return {
+                "status": "error",
+                "message": "Content generation API keys not configured",
+                "variants": []
+            }
+        
+        # Generate 3 email variants
+        variants = []
+        
+        try:
+            # Use Perplexity if available, fallback to OpenAI
+            if PERPLEXITY_API_KEY:
+                logger.info(f"Using Perplexity API for email generation")
+                
+                prompts = [
+                    f"Write a professional cold outreach email to {prospect_name} at {company}. Subject line only, no body. Style: Direct and to the point.",
+                    f"Write a friendly but professional cold outreach email to {prospect_name} at {company}. Subject line only, no body. Style: Warm and personable.",
+                    f"Write a consultative cold outreach email to {prospect_name} at {company}. Subject line only, no body. Style: Questions and insights."
+                ]
+                
+                for i, prompt in enumerate(prompts, 1):
+                    try:
+                        response = requests.post(
+                            "https://api.perplexity.ai/chat/completions",
+                            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}"},
+                            json={
+                                "model": "pplx-70b-online",
+                                "messages": [{"role": "user", "content": prompt}],
+                                "max_tokens": 200
+                            },
+                            timeout=15
+                        )
+                        
+                        if response.status_code == 200:
+                            content = response.json()["choices"][0]["message"]["content"]
+                            variants.append({
+                                "style": ["Direct", "Warm", "Consultative"][i-1],
+                                "subject": content[:100],
+                                "body": f"Generated email variant {i} for {prospect_name}",
+                                "generated_at": datetime.utcnow().isoformat()
+                            })
+                        else:
+                            logger.warning(f"Perplexity API error: {response.status_code}")
+                    except Exception as e:
+                        logger.error(f"Perplexity email generation error: {str(e)}")
+            
+            elif OPENAI_API_KEY:
+                logger.info(f"Using OpenAI API for email generation")
+                
+                # Stub implementation - would call OpenAI
+                for i, style in enumerate(["Direct", "Warm", "Consultative"], 1):
+                    variants.append({
+                        "style": style,
+                        "subject": f"[{style}] Quick question about {company}",
+                        "body": f"Hi {prospect_name}, I noticed your work at {company}...",
+                        "generated_at": datetime.utcnow().isoformat()
+                    })
+                
+        except Exception as e:
+            logger.error(f"Email generation error: {str(e)}")
+        
+        logger.info(f"✅ Generated {len(variants)} email variants")
+        
+        return {
+            "status": "success",
+            "contact_id": contact_id,
+            "variants": variants,
+            "count": len(variants),
+            "generated_at": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Email endpoint error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "status": "error",
+            "message": str(e),
+            "variants": []
+        }
+
+@app.post("/api/content/call-script")
+async def generate_call_scripts(request: dict):
+    """Generate call scripts for a contact"""
+    try:
+        contact_id = request.get("contact_id")
+        prospect_name = request.get("prospect_name", "Prospect")
+        company = request.get("company", "Company")
+        email = request.get("email", "")
+        jobtitle = request.get("jobtitle", "")
+        
+        logger.info(f"☎️  Generating call scripts for {prospect_name} @ {company} (contact_id: {contact_id})")
+        
+        if not OPENAI_API_KEY and not PERPLEXITY_API_KEY:
+            logger.error("No API keys configured for content generation")
+            return {
+                "status": "error",
+                "message": "Content generation API keys not configured",
+                "scripts": []
+            }
+        
+        # Generate 3 call scripts
+        scripts = []
+        
+        try:
+            if PERPLEXITY_API_KEY:
+                logger.info(f"Using Perplexity API for script generation")
+                
+                prompts = [
+                    f"Write a 3-sentence cold call opening for {prospect_name} at {company}. Approach: Direct value proposition.",
+                    f"Write a 3-sentence cold call opening for {prospect_name} at {company}. Approach: Build rapport first.",
+                    f"Write a 3-sentence cold call opening for {prospect_name} at {company}. Approach: Ask a discovery question."
+                ]
+                
+                for i, prompt in enumerate(prompts, 1):
+                    try:
+                        response = requests.post(
+                            "https://api.perplexity.ai/chat/completions",
+                            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}"},
+                            json={
+                                "model": "pplx-70b-online",
+                                "messages": [{"role": "user", "content": prompt}],
+                                "max_tokens": 150
+                            },
+                            timeout=15
+                        )
+                        
+                        if response.status_code == 200:
+                            content = response.json()["choices"][0]["message"]["content"]
+                            scripts.append({
+                                "style": ["Value Prop", "Rapport", "Discovery"][i-1],
+                                "opening": content[:200],
+                                "generated_at": datetime.utcnow().isoformat()
+                            })
+                        else:
+                            logger.warning(f"Perplexity API error: {response.status_code}")
+                    except Exception as e:
+                        logger.error(f"Perplexity script generation error: {str(e)}")
+            
+            elif OPENAI_API_KEY:
+                logger.info(f"Using OpenAI API for script generation")
+                
+                # Stub implementation - would call OpenAI
+                for i, style in enumerate(["Value Prop", "Rapport", "Discovery"], 1):
+                    scripts.append({
+                        "style": style,
+                        "opening": f"Hi {prospect_name}, I work with companies like {company}...",
+                        "generated_at": datetime.utcnow().isoformat()
+                    })
+            
+        except Exception as e:
+            logger.error(f"Call script generation error: {str(e)}")
+        
+        logger.info(f"✅ Generated {len(scripts)} call scripts")
+        
+        return {
+            "status": "success",
+            "contact_id": contact_id,
+            "scripts": scripts,
+            "count": len(scripts),
+            "generated_at": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Call script endpoint error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "status": "error",
+            "message": str(e),
+            "scripts": []
+        }
 
 # ============================================================================
 # HUBSPOT WEBHOOK ENDPOINT
@@ -158,11 +352,6 @@ async def root():
 async def hubspot_webhook(request: dict):
     """
     Receive HubSpot contact events and auto-enrich with emails + call scripts
-    
-    Expected payload:
-    {
-        "objectId": "44342135"
-    }
     """
     try:
         contact_id = request.get("objectId")
