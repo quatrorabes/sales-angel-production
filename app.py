@@ -1,649 +1,411 @@
 """
-SALES ANGEL PRODUCTION - FastAPI Application
-HubSpot Webhook Integration with Auto-Enrichment
-Fixed: SQLAlchemy Base, psycopg2, error handling
-Enhanced: Better logging + stub content endpoints
+Sales Angel - HubSpot Webhook + Perplexity Integration
+
+- Framework: FastAPI
+- External APIs:
+    - HubSpot CRM v3 (contacts)
+    - Perplexity Chat Completions (model: sonar-pro)
+- Environment variables (set in Railway):
+    - HUBSPOT_API_KEY
+    - PERPLEXITY_API_KEY
+
+Behavior:
+- POST /webhooks/hubspot with JSON: {"objectId": "<hubspot_contact_id>"}
+- Fetches contact (firstname, lastname, company, email, jobtitle) from HubSpot
+- Generates:
+    - 3 email variants (subject + body)
+    - 3 call scripts
+- Writes results back to HubSpot contact properties:
+    - email_framework   (multi-line text)
+    - call_framework    (multi-line text)
+    - last_enrichment   (date, YYYY-MM-DD)
 """
 
 import os
-import sys
 import logging
 from datetime import datetime
-from typing import Optional, List
-import requests
-import json
+from typing import List, Dict, Any
 
-from fastapi import FastAPI, HTTPException
+import requests
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import create_engine, Column, Integer, String, Float, Text, DateTime, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
-# Load environment variables
+# -------------------------------------------------------------------------
+# Environment & Logging
+# -------------------------------------------------------------------------
+
 load_dotenv()
 
-# ============================================================================
-# LOGGING CONFIGURATION
-# ============================================================================
+HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
+PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("sales_angel_app")
 
-# ============================================================================
-# ENVIRONMENT VARIABLES
-# ============================================================================
+if not HUBSPOT_API_KEY:
+    logger.error("HUBSPOT_API_KEY is not configured")
 
-HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-RAILWAY_ENVIRONMENT = os.getenv("RAILWAY_ENVIRONMENT", "development")
-RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+if not PERPLEXITY_API_KEY:
+    logger.error("PERPLEXITY_API_KEY is not configured")
 
-logger.info(f"🚀 Starting Sales Angel Production - Environment: {RAILWAY_ENVIRONMENT}")
-logger.info(f"🔑 HUBSPOT_API_KEY configured: {bool(HUBSPOT_API_KEY)}")
-logger.info(f"🔑 OPENAI_API_KEY configured: {bool(OPENAI_API_KEY)}")
-logger.info(f"🔑 PERPLEXITY_API_KEY configured: {bool(PERPLEXITY_API_KEY)}")
-logger.info(f"🔑 DATABASE_URL configured: {bool(DATABASE_URL)}")
-
-# ============================================================================
-# DATABASE SETUP - MUST BE BEFORE MODEL DEFINITIONS
-# ============================================================================
-
-IS_PRODUCTION = RAILWAY_ENVIRONMENT == "production" or bool(RAILWAY_PUBLIC_DOMAIN)
-engine = None
-SessionLocal = None
-
-if DATABASE_URL and IS_PRODUCTION:
-    try:
-        logger.info(f"🚀 Production mode: Connecting to Railway database")
-        engine = create_engine(
-            DATABASE_URL,
-            pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
-            pool_recycle=3600,
-            connect_args={"connect_timeout": 10}
-        )
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        logger.info("✅ Database engine created successfully")
-    except Exception as e:
-        logger.error(f"❌ Database connection failed: {str(e)}")
-        engine = None
-        SessionLocal = None
-else:
-    logger.warning("⚠️ Development mode: Skipping database connection")
-    engine = None
-    SessionLocal = None
-
-# ============================================================================
-# SQLALCHEMY MODELS - DEFINE AFTER Base CREATION
-# ============================================================================
-
-Base = declarative_base()
-
-class Contact(Base):
-    """Contact model for database storage"""
-    __tablename__ = "contacts"
-    
-    id = Column(Integer, primary_key=True)
-    hubspot_id = Column(String, unique=True, nullable=False)
-    firstname = Column(String)
-    lastname = Column(String)
-    email = Column(String)
-    company = Column(String)
-    phone = Column(String)
-    jobtitle = Column(String)
-    enriched = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-# Create tables if engine exists
-if engine:
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Database tables created/verified")
-    except Exception as e:
-        logger.error(f"❌ Failed to create tables: {str(e)}")
-
-# ============================================================================
-# FASTAPI APPLICATION
-# ============================================================================
+# -------------------------------------------------------------------------
+# FastAPI app
+# -------------------------------------------------------------------------
 
 app = FastAPI(
     title="Sales Angel Production API",
-    description="HubSpot webhook integration with AI-powered content generation",
-    version="1.0.0"
+    description="HubSpot webhook integration with Perplexity sonar-pro",
+    version="1.0.0",
 )
 
-# ============================================================================
-# HEALTH CHECK ENDPOINTS
-# ============================================================================
+# -------------------------------------------------------------------------
+# Constants
+# -------------------------------------------------------------------------
+
+HUBSPOT_BASE_URL = "https://api.hubapi.com"
+PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
+PERPLEXITY_MODEL = "sonar-pro"
+
+
+# -------------------------------------------------------------------------
+# Perplexity helpers
+# -------------------------------------------------------------------------
+
+def call_perplexity(prompt: str, max_tokens: int = 300) -> str:
+    """
+    Call Perplexity sonar-pro with a simple user prompt.
+    Returns the assistant message content as plain text.
+    """
+    if not PERPLEXITY_API_KEY:
+        raise RuntimeError("PERPLEXITY_API_KEY not configured")
+
+    headers = {
+        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": PERPLEXITY_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    }
+
+    response = requests.post(PERPLEXITY_URL, headers=headers, json=payload, timeout=20)
+    if response.status_code != 200:
+        logger.error(
+            f"Perplexity API error {response.status_code}: {response.text[:500]}"
+        )
+        raise RuntimeError(f"Perplexity API error {response.status_code}")
+
+    data = response.json()
+    content = data["choices"][0]["message"]["content"]
+    return content.strip()
+
+
+def generate_email_variants(
+    prospect_name: str,
+    company: str,
+    job_title: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Generate 3 email variants: Direct, Warm, Consultative.
+    Each item: {"style": str, "subject": str, "body": str}
+    """
+    styles = [
+        ("Direct", "Write a concise, direct cold email."),
+        ("Warm", "Write a warm, relationship-building cold email."),
+        ("Consultative", "Write a consultative, question-led cold email."),
+    ]
+
+    variants: List[Dict[str, Any]] = []
+
+    for style_name, style_desc in styles:
+        prompt = (
+            f"You are a senior B2B sales copywriter.\n"
+            f"Prospect: {prospect_name}\n"
+            f"Company: {company or 'Unknown Company'}\n"
+            f"Title: {job_title or 'Unknown title'}\n\n"
+            f"{style_desc}\n"
+            f"Output format strictly as:\n"
+            f"Subject: <one compelling subject line>\n"
+            f"Body:\n"
+            f"<email body, 4–7 short paragraphs>"
+        )
+
+        try:
+            raw = call_perplexity(prompt, max_tokens=400)
+
+            subject = "N/A"
+            body = raw
+
+            if "Subject:" in raw:
+                parts = raw.split("Body:", 1)
+                subject_line = parts[0].replace("Subject:", "").strip()
+                subject = subject_line[:150]
+                if len(parts) > 1:
+                    body = parts[1].strip()
+
+            variants.append(
+                {
+                    "style": style_name,
+                    "subject": subject,
+                    "body": body,
+                }
+            )
+        except Exception as e:
+            logger.error(f"Email generation failed for style {style_name}: {e}")
+
+    return variants
+
+
+def generate_call_scripts(
+    prospect_name: str,
+    company: str,
+    job_title: str = "",
+) -> List[Dict[str, Any]]:
+    """
+    Generate 3 call scripts: Value Prop, Rapport, Discovery.
+    Each item: {"style": str, "script": str}
+    """
+    styles = [
+        ("Value Prop", "Direct value proposition opening and 3 concise points."),
+        ("Rapport", "Start with rapport, then transition to value and ask for time."),
+        ("Discovery", "Ask 3–5 strong discovery questions with brief intro and close."),
+    ]
+
+    scripts: List[Dict[str, Any]] = []
+
+    for style_name, style_desc in styles:
+        prompt = (
+            f"You are a senior SDR crafting a cold call script.\n"
+            f"Prospect: {prospect_name}\n"
+            f"Company: {company or 'Unknown Company'}\n"
+            f"Title: {job_title or 'Unknown title'}\n\n"
+            f"{style_desc}\n"
+            f"Output format strictly as:\n"
+            f"Script:\n"
+            f"<call script in 6–10 lines>"
+        )
+
+        try:
+            raw = call_perplexity(prompt, max_tokens=300)
+            script_text = raw
+
+            if "Script:" in raw:
+                script_text = raw.split("Script:", 1)[1].strip()
+
+            scripts.append(
+                {
+                    "style": style_name,
+                    "script": script_text,
+                }
+            )
+        except Exception as e:
+            logger.error(f"Call script generation failed for style {style_name}: {e}")
+
+    return scripts
+
+
+# -------------------------------------------------------------------------
+# HubSpot helpers
+# -------------------------------------------------------------------------
+
+def fetch_hubspot_contact(contact_id: str) -> Dict[str, Any]:
+    """
+    Fetch a contact from HubSpot by ID with selected properties.
+    """
+    if not HUBSPOT_API_KEY:
+        raise RuntimeError("HUBSPOT_API_KEY not configured")
+
+    headers = {
+        "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    params = {
+        "properties": "firstname,lastname,company,email,jobtitle",
+    }
+
+    url = f"{HUBSPOT_BASE_URL}/crm/v3/objects/contacts/{contact_id}"
+    resp = requests.get(url, headers=headers, params=params, timeout=10)
+
+    if resp.status_code != 200:
+        logger.error(f"HubSpot fetch error {resp.status_code}: {resp.text[:500]}")
+        raise RuntimeError(f"Failed to fetch HubSpot contact: {resp.status_code}")
+
+    return resp.json().get("properties", {}) or {}
+
+
+def update_hubspot_framework_fields(
+    contact_id: str,
+    email_variants: List[Dict[str, Any]],
+    call_scripts: List[Dict[str, Any]],
+) -> bool:
+    """
+    Update HubSpot contact properties:
+        - email_framework
+        - call_framework
+        - last_enrichment
+    """
+
+    if not HUBSPOT_API_KEY:
+        logger.error("HUBSPOT_API_KEY not configured")
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    # Build multi-line text content for email_framework
+    email_lines: List[str] = ["=== SALES ANGEL EMAIL FRAMEWORK ==="]
+    for i, v in enumerate(email_variants, start=1):
+        email_lines.append(f"\n[{i}] {v.get('style', 'Variant')}")
+        email_lines.append(f"Subject: {v.get('subject', 'N/A')}")
+        email_lines.append("Body:")
+        email_lines.append(v.get("body", "").strip())
+        email_lines.append("-" * 60)
+
+    email_text = "\n".join(email_lines)
+
+    # Build multi-line text content for call_framework
+    call_lines: List[str] = ["=== SALES ANGEL CALL FRAMEWORK ==="]
+    for i, s in enumerate(call_scripts, start=1):
+        call_lines.append(f"\n[{i}] {s.get('style', 'Script')}")
+        call_lines.append("Script:")
+        call_lines.append(s.get("script", "").strip())
+        call_lines.append("-" * 60)
+
+    call_text = "\n".join(call_lines)
+
+    payload = {
+        "properties": {
+            "email_framework": email_text,
+            "call_framework": call_text,
+            "last_enrichment": datetime.utcnow().strftime("%Y-%m-%d"),
+        }
+    }
+
+    url = f"{HUBSPOT_BASE_URL}/crm/v3/objects/contacts/{contact_id}"
+    resp = requests.patch(url, headers=headers, json=payload, timeout=10)
+
+    if resp.status_code == 200:
+        logger.info(f"✅ HubSpot updated for contact {contact_id}")
+        return True
+
+    logger.error(f"HubSpot update error {resp.status_code}: {resp.text[:500]}")
+    return False
+
+
+# -------------------------------------------------------------------------
+# Health endpoint
+# -------------------------------------------------------------------------
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint"""
+async def health():
     return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "environment": RAILWAY_ENVIRONMENT,
-        "database": "connected" if engine else "disconnected",
+        "status": "ok",
         "hubspot_configured": bool(HUBSPOT_API_KEY),
-        "openai_configured": bool(OPENAI_API_KEY),
-        "perplexity_configured": bool(PERPLEXITY_API_KEY)
+        "perplexity_configured": bool(PERPLEXITY_API_KEY),
+        "timestamp": datetime.utcnow().isoformat(),
     }
 
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "app": "Sales Angel Production",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "health": "/health",
-            "webhook": "/webhooks/hubspot",
-            "content_email": "/api/content/email",
-            "content_call_script": "/api/content/call-script",
-            "docs": "/docs"
-        }
-    }
 
-# ============================================================================
-# CONTENT GENERATION ENDPOINTS
-# ============================================================================
-
-@app.post("/api/content/email")
-async def generate_emails(request: dict):
-    """Generate email variants for a contact"""
-    try:
-        contact_id = request.get("contact_id")
-        prospect_name = request.get("prospect_name", "Prospect")
-        company = request.get("company", "Company")
-        email = request.get("email", "")
-        jobtitle = request.get("jobtitle", "")
-        
-        logger.info(f"📧 Generating emails for {prospect_name} @ {company} (contact_id: {contact_id})")
-        
-        if not OPENAI_API_KEY and not PERPLEXITY_API_KEY:
-            logger.error("No API keys configured for content generation")
-            return {
-                "status": "error",
-                "message": "Content generation API keys not configured",
-                "variants": []
-            }
-        
-        # Generate 3 email variants
-        variants = []
-        
-        try:
-            # Use Perplexity if available, fallback to OpenAI
-            if PERPLEXITY_API_KEY:
-                logger.info(f"Using Perplexity API for email generation")
-                
-                prompts = [
-                    f"Write a professional cold outreach email to {prospect_name} at {company}. Subject line only, no body. Style: Direct and to the point.",
-                    f"Write a friendly but professional cold outreach email to {prospect_name} at {company}. Subject line only, no body. Style: Warm and personable.",
-                    f"Write a consultative cold outreach email to {prospect_name} at {company}. Subject line only, no body. Style: Questions and insights."
-                ]
-                
-                for i, prompt in enumerate(prompts, 1):
-                    try:
-                        response = requests.post(
-                            "https://api.perplexity.ai/chat/completions",
-                            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}"},
-                            json={
-                                "model": "sonar-pro",
-                                "messages": [{"role": "user", "content": prompt}],
-                                "max_tokens": 200
-                            },
-                            timeout=15
-                        )
-                        
-                        if response.status_code == 200:
-                            content = response.json()["choices"][0]["message"]["content"]
-                            variants.append({
-                                "style": ["Direct", "Warm", "Consultative"][i-1],
-                                "subject": content[:100],
-                                "body": f"Generated email variant {i} for {prospect_name}",
-                                "generated_at": datetime.utcnow().isoformat()
-                            })
-                        else:
-                            logger.warning(f"Perplexity API error: {response.status_code}")
-                    except Exception as e:
-                        logger.error(f"Perplexity email generation error: {str(e)}")
-            
-            elif OPENAI_API_KEY:
-                logger.info(f"Using OpenAI API for email generation")
-                
-                # Stub implementation - would call OpenAI
-                for i, style in enumerate(["Direct", "Warm", "Consultative"], 1):
-                    variants.append({
-                        "style": style,
-                        "subject": f"[{style}] Quick question about {company}",
-                        "body": f"Hi {prospect_name}, I noticed your work at {company}...",
-                        "generated_at": datetime.utcnow().isoformat()
-                    })
-                
-        except Exception as e:
-            logger.error(f"Email generation error: {str(e)}")
-        
-        logger.info(f"✅ Generated {len(variants)} email variants")
-        
-        return {
-            "status": "success",
-            "contact_id": contact_id,
-            "variants": variants,
-            "count": len(variants),
-            "generated_at": datetime.utcnow().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Email endpoint error: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {
-            "status": "error",
-            "message": str(e),
-            "variants": []
-        }
-
-@app.post("/api/content/call-script")
-async def generate_call_scripts(request: dict):
-    """Generate call scripts for a contact"""
-    try:
-        contact_id = request.get("contact_id")
-        prospect_name = request.get("prospect_name", "Prospect")
-        company = request.get("company", "Company")
-        email = request.get("email", "")
-        jobtitle = request.get("jobtitle", "")
-        
-        logger.info(f"☎️  Generating call scripts for {prospect_name} @ {company} (contact_id: {contact_id})")
-        
-        if not OPENAI_API_KEY and not PERPLEXITY_API_KEY:
-            logger.error("No API keys configured for content generation")
-            return {
-                "status": "error",
-                "message": "Content generation API keys not configured",
-                "scripts": []
-            }
-        
-        # Generate 3 call scripts
-        scripts = []
-        
-        try:
-            if PERPLEXITY_API_KEY:
-                logger.info(f"Using Perplexity API for script generation")
-                
-                prompts = [
-                    f"Write a 3-sentence cold call opening for {prospect_name} at {company}. Approach: Direct value proposition.",
-                    f"Write a 3-sentence cold call opening for {prospect_name} at {company}. Approach: Build rapport first.",
-                    f"Write a 3-sentence cold call opening for {prospect_name} at {company}. Approach: Ask a discovery question."
-                ]
-                
-                for i, prompt in enumerate(prompts, 1):
-                    try:
-                        response = requests.post(
-                            "https://api.perplexity.ai/chat/completions",
-                            headers={"Authorization": f"Bearer {PERPLEXITY_API_KEY}"},
-                            json={
-                                "model": "sonar-pro",
-                                "messages": [{"role": "user", "content": prompt}],
-                                "max_tokens": 150
-                            },
-                            timeout=15
-                        )
-                        
-                        if response.status_code == 200:
-                            content = response.json()["choices"][0]["message"]["content"]
-                            scripts.append({
-                                "style": ["Value Prop", "Rapport", "Discovery"][i-1],
-                                "opening": content[:200],
-                                "generated_at": datetime.utcnow().isoformat()
-                            })
-                        else:
-                            logger.warning(f"Perplexity API error: {response.status_code}")
-                    except Exception as e:
-                        logger.error(f"Perplexity script generation error: {str(e)}")
-            
-            elif OPENAI_API_KEY:
-                logger.info(f"Using OpenAI API for script generation")
-                
-                # Stub implementation - would call OpenAI
-                for i, style in enumerate(["Value Prop", "Rapport", "Discovery"], 1):
-                    scripts.append({
-                        "style": style,
-                        "opening": f"Hi {prospect_name}, I work with companies like {company}...",
-                        "generated_at": datetime.utcnow().isoformat()
-                    })
-            
-        except Exception as e:
-            logger.error(f"Call script generation error: {str(e)}")
-        
-        logger.info(f"✅ Generated {len(scripts)} call scripts")
-        
-        return {
-            "status": "success",
-            "contact_id": contact_id,
-            "scripts": scripts,
-            "count": len(scripts),
-            "generated_at": datetime.utcnow().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Call script endpoint error: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {
-            "status": "error",
-            "message": str(e),
-            "scripts": []
-        }
-
-# ============================================================================
-# HUBSPOT WEBHOOK ENDPOINT
-# ============================================================================
+# -------------------------------------------------------------------------
+# Webhook endpoint
+# -------------------------------------------------------------------------
 
 @app.post("/webhooks/hubspot")
-async def hubspot_webhook(request: dict):
+async def hubspot_webhook(payload: Dict[str, Any]):
     """
-    Receive HubSpot contact events and auto-enrich with emails + call scripts
+    HubSpot Webhook:
+    Expects JSON: {"objectId": "<hubspot_contact_id>"}
     """
     try:
-        contact_id = request.get("objectId")
-        
+        contact_id = str(payload.get("objectId") or "").strip()
         if not contact_id:
-            logger.error("No objectId provided in webhook payload")
-            return {
-                "status": "error",
-                "message": "Missing objectId in request"
-            }
-        
-        logger.info(f"🔔 HubSpot webhook received for contact: {contact_id}")
-        
-        # Validate HUBSPOT_API_KEY
-        if not HUBSPOT_API_KEY:
-            logger.error("HUBSPOT_API_KEY not configured")
-            return {
-                "status": "error",
-                "message": "HUBSPOT_API_KEY not configured"
-            }
-        
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 1: FETCH CONTACT FROM HUBSPOT
-        # ════════════════════════════════════════════════════════════════════
-        
-        headers = {
-            "Authorization": f"Bearer {HUBSPOT_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
-        params = {"properties": "firstname,lastname,company,email,phone,jobtitle"}
-        
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            
-            if response.status_code != 200:
-                logger.error(f"HubSpot fetch error: {response.status_code}")
-                logger.error(f"Response: {response.text}")
-                return {
-                    "status": "error",
-                    "message": f"Failed to fetch contact from HubSpot: {response.status_code}",
-                    "contact_id": contact_id
-                }
-            
-            contact_data = response.json()
-            
-        except requests.Timeout:
-            logger.error("HubSpot API request timed out")
-            return {
-                "status": "error",
-                "message": "HubSpot API request timed out",
-                "contact_id": contact_id
-            }
-        except Exception as e:
-            logger.error(f"Failed to fetch contact from HubSpot: {str(e)}")
-            return {
-                "status": "error",
-                "message": f"Failed to fetch contact: {str(e)}",
-                "contact_id": contact_id
-            }
-        
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 2: PARSE CONTACT DATA
-        # ════════════════════════════════════════════════════════════════════
-        
-        properties = contact_data.get("properties", {})
-        
-        first_name = properties.get("firstname", "")
-        last_name = properties.get("lastname", "")
-        company = properties.get("company", "Unknown Company")
-        email = properties.get("email", "")
-        phone = properties.get("phone", "")
-        jobtitle = properties.get("jobtitle", "")
-        
-        prospect_name = f"{first_name} {last_name}".strip() or "Unknown Contact"
-        
-        logger.info(f"📧 Enriching: {prospect_name} @ {company}")
-        
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 3: GENERATE EMAILS
-        # ════════════════════════════════════════════════════════════════════
-        
-        email_variants = []
-        try:
-            base_url = RAILWAY_PUBLIC_DOMAIN if RAILWAY_PUBLIC_DOMAIN else "http://localhost:8000"
-            if not base_url.startswith("http"):
-                base_url = f"https://{base_url}"
-            
-            logger.info(f"Generating emails from: {base_url}")
-            
-            emails_response = requests.post(
-                f"{base_url}/api/content/email",
-                json={
-                    "contact_id": str(contact_id),
-                    "prospect_name": prospect_name,
-                    "company": company,
-                    "email": email,
-                    "phone": phone,
-                    "jobtitle": jobtitle
-                },
-                timeout=30
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "message": "Missing objectId in payload"},
             )
-            
-            if emails_response.status_code == 200:
-                email_variants = emails_response.json().get("variants", [])
-                logger.info(f"✅ Generated {len(email_variants)} email variants")
-            else:
-                logger.warning(f"Email generation failed: {emails_response.status_code}")
-                logger.warning(f"Response: {emails_response.text[:200]}")
-                
-        except requests.Timeout:
-            logger.error("Email generation request timed out")
-        except Exception as e:
-            logger.error(f"Email generation error: {str(e)}")
-        
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 4: GENERATE CALL SCRIPTS
-        # ════════════════════════════════════════════════════════════════════
-        
-        call_scripts = []
-        try:
-            base_url = RAILWAY_PUBLIC_DOMAIN if RAILWAY_PUBLIC_DOMAIN else "http://localhost:8000"
-            if not base_url.startswith("http"):
-                base_url = f"https://{base_url}"
-            
-            scripts_response = requests.post(
-                f"{base_url}/api/content/call-script",
-                json={
-                    "contact_id": str(contact_id),
-                    "prospect_name": prospect_name,
-                    "company": company,
-                    "email": email,
-                    "phone": phone,
-                    "jobtitle": jobtitle
-                },
-                timeout=30
-            )
-            
-            if scripts_response.status_code == 200:
-                call_scripts = scripts_response.json().get("scripts", [])
-                logger.info(f"✅ Generated {len(call_scripts)} call scripts")
-            else:
-                logger.warning(f"Call script generation failed: {scripts_response.status_code}")
-                logger.warning(f"Response: {scripts_response.text[:200]}")
-                
-        except requests.Timeout:
-            logger.error("Call script generation request timed out")
-        except Exception as e:
-            logger.error(f"Call script generation error: {str(e)}")
-        
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 5: FORMAT NOTES FOR HUBSPOT
-        # ════════════════════════════════════════════════════════════════════
-        
-        notes = f"""=== SALES ANGEL AUTO-ENRICHMENT ===
-Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
-Contact: {prospect_name}
-Company: {company}
-Email: {email}
-Phone: {phone}
-Title: {jobtitle}
 
-📧 EMAIL VARIANTS ({len(email_variants)} generated):
-"""
-        
-        for i, email_variant in enumerate(email_variants, 1):
-            subject = email_variant.get('subject', 'N/A')[:100]
-            style = email_variant.get('style', f'Email {i}')
-            notes += f"\n{i}. {style}\n   Subject: {subject}\n"
-        
-        notes += f"\n☎️ CALL SCRIPTS ({len(call_scripts)} generated):\n"
-        
-        for i, script in enumerate(call_scripts, 1):
-            style = script.get('style', f'Script {i}')
-            notes += f"\n{i}. {style}\n"
-        
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 6: UPDATE HUBSPOT CONTACT NOTES
-        # ════════════════════════════════════════════════════════════════════
-        
-        update_response = None
+        logger.info(f"🔔 HubSpot webhook received for contact: {contact_id}")
+
+        # 1) Fetch contact data
+        props = fetch_hubspot_contact(contact_id)
+        first_name = props.get("firstname", "") or ""
+        last_name = props.get("lastname", "") or ""
+        company = props.get("company", "") or ""
+        email = props.get("email", "") or ""
+        job_title = props.get("jobtitle", "") or ""
+
+        prospect_name = (first_name + " " + last_name).strip() or "Unknown Contact"
+        logger.info(f"📧 Enriching: {prospect_name} @ {company or 'Unknown Company'}")
+
+        # 2) Generate content via Perplexity
+        email_variants: List[Dict[str, Any]] = []
+        call_scripts: List[Dict[str, Any]] = []
+
         try:
-            update_payload = {
-                "properties": {
-                    "hs_note_body": notes
-                }
-            }
-            
-            update_response = requests.patch(
-                f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}",
-                headers=headers,
-                json=update_payload,
-                timeout=10
-            )
-            
-            if update_response.status_code == 200:
-                logger.info(f"✅ Updated notes for contact {contact_id}")
-            else:
-                logger.error(f"HubSpot update error: {update_response.status_code}")
-                logger.error(f"Response: {update_response.text}")
-                
-        except requests.Timeout:
-            logger.error("HubSpot update request timed out")
+            email_variants = generate_email_variants(prospect_name, company, job_title)
+            logger.info(f"✅ Generated {len(email_variants)} email variants")
         except Exception as e:
-            logger.error(f"Failed to update HubSpot: {str(e)}")
-        
-        # ════════════════════════════════════════════════════════════════════
-        # STEP 7: RETURN SUCCESS RESPONSE
-        # ════════════════════════════════════════════════════════════════════
-        
+            logger.error(f"Email generation error: {e}")
+
+        try:
+            call_scripts = generate_call_scripts(prospect_name, company, job_title)
+            logger.info(f"✅ Generated {len(call_scripts)} call scripts")
+        except Exception as e:
+            logger.error(f"Call script generation error: {e}")
+
+        # 3) Update HubSpot
+        properties_updated = update_hubspot_framework_fields(
+            contact_id=contact_id,
+            email_variants=email_variants,
+            call_scripts=call_scripts,
+        )
+
         response_data = {
             "status": "success",
             "contact_id": contact_id,
             "prospect": prospect_name,
-            "company": company,
-            "email": email,
+            "company": company or None,
+            "email": email or None,
             "emails_generated": len(email_variants),
             "scripts_generated": len(call_scripts),
-            "notes_updated": update_response.status_code == 200 if update_response else False,
-            "timestamp": datetime.utcnow().isoformat()
+            "properties_updated": properties_updated,
+            "timestamp": datetime.utcnow().isoformat(),
         }
-        
-        logger.info(f"✅ Webhook processing complete: {json.dumps(response_data)}")
+
+        logger.info(f"✅ Webhook processing complete: {response_data}")
         return response_data
-        
-    except Exception as e:
-        logger.error(f"❌ HubSpot webhook error: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        
-        return {
-            "status": "error",
-            "message": str(e),
-            "error_type": type(e).__name__,
-            "timestamp": datetime.utcnow().isoformat()
-        }
 
-# ============================================================================
-# ERROR HANDLERS
-# ============================================================================
+    except Exception as exc:
+        logger.error(f"❌ Webhook error: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": str(exc),
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    """Global exception handler"""
-    logger.error(f"Unhandled exception: {str(exc)}")
-    import traceback
-    logger.error(traceback.format_exc())
-    
-    return JSONResponse(
-        status_code=500,
-        content={
-            "status": "error",
-            "message": "Internal server error",
-            "detail": str(exc) if os.getenv("DEBUG") else "An error occurred"
-        }
-    )
 
-# ============================================================================
-# STARTUP/SHUTDOWN EVENTS
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Startup event"""
-    logger.info("🚀 Application startup")
-    logger.info(f"Environment: {RAILWAY_ENVIRONMENT}")
-    logger.info(f"Database: {'Connected' if engine else 'Disabled'}")
-    logger.info(f"HubSpot Integration: {'Ready' if HUBSPOT_API_KEY else 'Not configured'}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Shutdown event"""
-    logger.info("🛑 Application shutdown")
-    if engine:
-        engine.dispose()
-
-# ============================================================================
-# MAIN
-# ============================================================================
+# -------------------------------------------------------------------------
+# Local dev entrypoint (optional)
+# -------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
-    
-    port = int(os.getenv("PORT", 8000))
-    host = "0.0.0.0"
-    
-    logger.info(f"Starting server on {host}:{port}")
-    
+
     uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info"
+        "app:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        reload=True,
+        log_level="info",
     )
