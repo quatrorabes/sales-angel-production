@@ -286,8 +286,100 @@ class ProfileEnrichmentEngine:
         contact_id = request.get("objectId")
         logger.info(f"🔔 HubSpot webhook received for contact: {contact_id}")
         
-        # ... all your code ...
+        if not HUBSPOT_API_KEY:
+          return {"status": "error", "message": "HUBSPOT_API_KEY not configured"}
         
+        headers = {
+          "Authorization": f"Bearer {HUBSPOT_API_KEY}",
+          "Content-Type": "application/json"
+        }
+        
+        url = f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}"
+        params = {"properties": ["firstname", "lastname", "company", "email"]}
+        
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code != 200:
+          logger.error(f"HubSpot fetch error: {response.status_code}")
+          return {"status": "error", "message": f"Failed to fetch contact: {response.status_code}"}
+        
+        # Extract contact data ONLY if status is 200
+        contact_data = response.json()
+        properties = contact_data.get("properties", {})
+        
+        first_name = properties.get("firstname", {}).get("value", "")
+        last_name = properties.get("lastname", {}).get("value", "")
+        company = properties.get("company", {}).get("value", "")
+        email = properties.get("email", {}).get("value", "")
+        
+        prospect_name = f"{first_name} {last_name}".strip()
+        
+        logger.info(f"📧 Enriching: {prospect_name} @ {company}")
+        
+        # Generate emails
+        try:
+          emails_response = requests.post(
+            "http://localhost:8000/api/content/email",
+            json={
+              "contact_id": str(contact_id),
+              "prospect_name": prospect_name,
+              "company": company
+            },
+            timeout=10
+          )
+          email_variants = emails_response.json().get("variants", []) if emails_response.status_code == 200 else []
+        except Exception as e:
+          logger.error(f"Email generation error: {str(e)}")
+          email_variants = []
+          
+        # Generate call scripts
+        try:
+          scripts_response = requests.post(
+            "http://localhost:8000/api/content/call-script",
+            json={
+              "contact_id": str(contact_id),
+              "prospect_name": prospect_name,
+              "company": company
+            },
+            timeout=10
+          )
+          call_scripts = scripts_response.json().get("scripts", []) if scripts_response.status_code == 200 else []
+        except Exception as e:
+          logger.error(f"Call script generation error: {str(e)}")
+          call_scripts = []
+          
+        # Format results for HubSpot notes
+        notes = f"""=== SALES ANGEL AUTO-ENRICHMENT ===
+    Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
+    
+    📧 EMAIL VARIANTS:
+    """
+        for i, email in enumerate(email_variants, 1):
+          subject = email.get('subject', 'N/A')[:100]
+          notes += f"\n{i}. {email.get('style', 'Email')}\n   Subject: {subject}\n"
+          
+        notes += "\n\n☎️ CALL SCRIPTS:\n"
+        for i, script in enumerate(call_scripts, 1):
+          notes += f"\n{i}. {script.get('style', 'Script')}\n"
+          
+        # Update HubSpot contact notes
+        update_payload = {
+          "properties": {
+            "notes": notes
+          }
+        }
+        
+        update_response = requests.patch(
+          f"https://api.hubapi.com/crm/v3/objects/contacts/{contact_id}",
+          headers=headers,
+          json=update_payload
+        )
+        
+        if update_response.status_code == 200:
+          logger.info(f"✅ Updated notes for contact {contact_id}")
+        else:
+          logger.error(f"HubSpot update error: {update_response.status_code}")
+          
         return {
           "status": "success",
           "contact_id": contact_id,
@@ -300,7 +392,6 @@ class ProfileEnrichmentEngine:
       except Exception as e:
         logger.error(f"❌ HubSpot webhook error: {str(e)}")
         return {"status": "error", "message": str(e)}
-      
       
 
 
