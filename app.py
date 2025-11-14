@@ -302,8 +302,7 @@ class ProfileEnrichmentEngine:
         return {"status": "error", "message": str(e)}
       
       
-    # Initialize enrichment engine
-    enrichment_engine = ProfileEnrichmentEngine()
+
 
 # Initialize enrichment engine
 enrichment_engine = ProfileEnrichmentEngine()
